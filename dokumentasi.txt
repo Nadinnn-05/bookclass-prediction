@@ -1,0 +1,250 @@
+================================================================================
+DOKUMENTASI LENGKAP PROYEK BOOKCLASS
+Aplikasi Web Prediksi Kategori Buku Bestseller (Django + ML + Groq AI)
+================================================================================
+
+1. GAMBARAN UMUM PROYEK
+--------------------------------------------------------------------------------
+BookClass adalah aplikasi web berbasis Django yang berfungsi untuk memprediksi
+kategori genre sebuah buku bestseller Amazon, yaitu "Fiction" atau "Non Fiction",
+berdasarkan empat karakteristik buku:
+  1. User Rating (1.0 - 5.0)
+  2. Jumlah Reviews (0 - 100.000)
+  3. Harga dalam USD (0 - 150)
+  4. Tahun masuk daftar bestseller (2009 - 2019)
+
+Selain menampilkan hasil prediksi kategori dan tingkat keyakinan model (%),
+aplikasi ini juga menampilkan:
+  - Satu grafik batang (bar chart) perbandingan rata-rata harga buku Fiction
+    dan Non Fiction dari dataset.
+  - Penjelasan otomatis berbahasa Indonesia sederhana menggunakan Groq API
+    untuk membantu pengguna awam memahami arti hasil prediksi dan grafik harga.
+
+Prinsip penting pada arsitektur proyek ini:
+  "Model ML berjalan lokal dan independen dari AI."
+  Artinya, apabila Groq API sedang mengalami batas kuota (rate limit),
+  gangguan jaringan, atau API key belum diisi, proses prediksi kategori ML
+  tetap berjalan normal dan hasilnya tidak pernah diubah oleh penjelasan AI.
+
+
+2. TEKNOLOGI & DEPENDENSI YANG DIGUNAKAN
+--------------------------------------------------------------------------------
+Daftar library utama (tercatat di requirements.txt):
+  - Django 6.1.3          : Framework web backend, routing, form, dan template.
+  - scikit-learn 1.9.1    : Pelatihan dan inferensi model machine learning.
+  - joblib 1.6.0          : Menyimpan (dump) dan memuat (load) model terlatih.
+  - pandas 3.1.1          : Membaca dan mengolah dataset CSV serta menyusun input.
+  - numpy 2.5.5           : Komputasi numerik pendukung pandas & scikit-learn.
+  - matplotlib 3.11.2     : Membuat grafik batang rata-rata harga per genre.
+  - requests 2.34.2       : Mengirim permintaan HTTP ke Groq API.
+  - python-dotenv 1.2.4   : Membaca konfigurasi sensitif (API key) dari file .env.
+
+
+3. PENJELASAN DATASET & PELATIHAN MODEL ML
+--------------------------------------------------------------------------------
+File terkait:
+  - klasifikasi/ml/bestsellers.csv
+  - klasifikasi/ml/train_model.py
+  - klasifikasi/ml/model.pkl
+
+A. Dataset (bestsellers.csv)
+   Dataset berisi daftar buku bestseller Amazon tahun 2009-2019 (550 baris awal).
+   Karena satu judul buku dapat masuk daftar bestseller di beberapa tahun yang
+   berbeda, dilakukan penghapusan duplikat berdasarkan kolom "Name":
+     df = df.drop_duplicates(subset="Name").reset_index(drop=True)
+   Hasilnya menyisakan 351 buku unik. Langkah ini penting untuk mencegah
+   kebocoran data (data leakage) antara data latih dan data uji.
+
+   Target klasifikasi dipetakan menjadi angka:
+     - 0 = "Fiction"
+     - 1 = "Non Fiction"
+
+B. Proses Pelatihan (train_model.py)
+   Skrip train_model.py membandingkan 3 algoritma klasifikasi:
+     1. DecisionTreeClassifier (max_depth=5, random_state=42)
+     2. Pipeline StandardScaler + KNeighborsClassifier (n_neighbors=5)
+     3. RandomForestClassifier (n_estimators=200, max_depth=5,
+        min_samples_leaf=5, random_state=42)
+
+   Masing-masing algoritma diuji dengan 2 kombinasi fitur:
+     - Dengan Year : ["User Rating", "Reviews", "Price", "Year"]
+     - Tanpa Year  : ["User Rating", "Reviews", "Price"]
+
+   Pembagian data menggunakan train_test_split (test_size=0.2, random_state=42,
+   stratify=y). Model terbaik dipilih berdasarkan akurasi tertinggi (jika seri,
+   Random Forest diprioritaskan).
+
+C. Hasil Model Tersimpan (model.pkl)
+   Model yang tersimpan di klasifikasi/ml/model.pkl adalah RandomForestClassifier
+   dengan 4 fitur ["User Rating", "Reviews", "Price", "Year"] dan bobot
+   kepentingan fitur (feature importances) sekitar:
+     - Reviews     : ~0.403 (40.3%)
+     - User Rating : ~0.265 (26.5%)
+     - Year        : ~0.181 (18.1%)
+     - Price       : ~0.151 (15.1%)
+   Model disimpan bersama metadata ("model", "features", "labels",
+   "sklearn_version") ke dalam model.pkl menggunakan joblib.dump().
+
+
+4. PENJELASAN RINCI SETIAP FILE KODE
+--------------------------------------------------------------------------------
+A. bookclass/settings.py
+   - Mengatur INSTALLED_APPS dengan mendaftarkan aplikasi 'klasifikasi'.
+   - Mengatur LANGUAGE_CODE = "id" agar pesan validasi form bawaan Django
+     tampil dalam bahasa Indonesia.
+   - Menggunakan SQLite (db.sqlite3) sebagai database default Django.
+
+B. bookclass/urls.py
+   - Mengarahkan path "/admin/" ke Django Admin dan path "" ke klasifikasi.urls.
+
+C. klasifikasi/forms.py
+   - Mendefinisikan class BukuForm dengan 4 field:
+     * user_rating (FloatField, min 1.0, max 5.0, initial 4.7, step 0.1)
+     * reviews     (IntegerField, min 0, max 100000, initial 15200)
+     * price       (FloatField, min 0, max 150, initial 12)
+     * year        (IntegerField, min 2009, max 2019, initial 2018)
+   - Validasi batas ini menangani kasus input ekstrem/tidak masuk akal sebelum
+     diteruskan ke model ML.
+
+D. klasifikasi/urls.py
+   Mendaftarkan 4 endpoint:
+     1. ""                    -> views.index (halaman utama + form prediksi)
+     2. "penjelasan/"         -> views.penjelasan (JSON penjelasan grafik)
+     3. "penjelasan-prediksi/"-> views.penjelasan_prediksi_view (JSON penjelasan prediksi)
+     4. "status-ai/"          -> views.status_ai (JSON status ketersediaan/limit Groq)
+
+E. klasifikasi/views.py
+   1. Pemuatan model sekali saat server menyala:
+      bundle = joblib.load(ML_DIR / "model.pkl")
+      Memisahkan model, FEATURES, dan LABELS agar inferensi cepat tanpa memuat
+      ulang file model pada setiap request.
+
+   2. buat_grafik():
+      - Membaca bestsellers.csv dan menghapus duplikat berdasarkan "Name".
+      - Menghitung rata-rata harga per genre ("Fiction" dan "Non Fiction").
+      - Menggambar diagram batang menggunakan matplotlib (backend "Agg" agar
+        aman berjalan di server tanpa GUI).
+      - Mengonversi gambar PNG di memori (io.BytesIO) menjadi string base64
+        untuk disematkan langsung ke tag <img> di HTML.
+
+   3. index(request):
+      - Pada GET: menampilkan form kosong (nilai initial), grafik harga, dan
+        status_ai awal dari status_groq().
+      - Pada POST: memvalidasi BukuForm. Jika valid, menyusun DataFrame X
+        dengan urutan kolom persis sama seperti FEATURES, memanggil
+        model.predict(X) dan model.predict_proba(X), lalu menghasilkan:
+          * hasil: {"label": ..., "keyakinan": ...}
+          * payload_prediksi: data input + hasil untuk dikirim ke Groq secara
+            asinkron dari browser.
+
+   4. status_ai(request):
+      Mengembalikan JsonResponse(status_groq()) berisi status apakah semua
+      model Groq sedang limit atau siap digunakan.
+
+   5. penjelasan(request):
+      Mengembalikan JsonResponse(penjelasan_grafik(paksa)) untuk penjelasan
+      grafik. Parameter ?refresh=1 memaksa pengambilan ulang dari Groq API.
+
+   6. penjelasan_prediksi_view(request):
+      Endpoint POST JSON (@require_POST) yang memvalidasi payload input buku
+      dan hasil prediksi, lalu memanggil penjelasan_prediksi(data_buku, hasil).
+      Jika payload tidak valid atau label tidak dikenali, mengembalikan HTTP 400.
+
+F. klasifikasi/ai_explain.py
+   Modul ini menangani seluruh komunikasi dengan Groq API:
+   1. Konfigurasi dari .env:
+      - GROQ_API_KEY         : API key Groq.
+      - GROQ_MODEL           : Model utama (default: "openai/gpt-oss-120b").
+      - GROQ_FALLBACK_MODELS : Daftar model cadangan yang dipisah koma
+                               (default: "openai/gpt-oss-20b,qwen/qwen3-32b,
+                               llama-3.1-8b-instant").
+
+   2. Pembuatan Konteks & Prompt:
+      - ringkasan_data()        : Menghitung count, mean, median, std, min, max
+                                  harga per genre dari 351 buku unik.
+      - ringkasan_fitur_genre() : Menghitung rata-rata & median tiap fitur per
+                                  genre sebagai konteks perbandingan prediksi.
+      - buat_prompt()           : Menyusun prompt penjelasan grafik (3-4 kalimat,
+                                  bahasa Indonesia tanpa markdown).
+      - buat_prompt_prediksi()  : Menyusun prompt penjelasan prediksi untuk orang
+                                  awam (memuat input user, hasil, bobot fitur,
+                                  dan rata-rata dataset).
+
+   3. Pelacakan Limit Per Model & Fallback Otomatis:
+      - _limit_per_model : Menyimpan waktu reset cooldown per model_id.
+      - _perbarui_limit_dari_header() : Membaca header x-ratelimit-remaining-requests
+        dan x-ratelimit-remaining-tokens dari respons 200 OK Groq untuk
+        mendeteksi kuota habis secara proaktif.
+      - tanya_groq() : Mencoba model berurutan dari model utama -> model
+        cadangan -> daftar model chat aktif dari GET /openai/v1/models.
+        * Jika HTTP 404: menandai model tidak tersedia dan mengambil daftar
+          model aktif dari Groq, lalu otomatis mencoba model berikutnya.
+        * Jika HTTP 429: mencatat waktu reset dari header retry-after /
+          x-ratelimit-reset-* untuk model tersebut, lalu otomatis berpindah ke
+          model cadangan berikutnya.
+      - status_groq() : Mengembalikan limit=True hanya jika GROQ_API_KEY kosong
+        atau SELURUH model kandidat sedang dalam masa cooldown limit.
+
+   4. Caching:
+      - _cache          : Menyimpan hasil penjelasan grafik agar tidak boros kuota.
+      - _cache_prediksi : Menyimpan hasil penjelasan prediksi berdasarkan tuple
+                          (user_rating, reviews, price, year, label, keyakinan).
+
+G. klasifikasi/templates/klasifikasi/index.html
+   Antarmuka web bertema toko buku "Matcha":
+   - Kartu "Data Buku" (Kartu Katalog):
+     Berisi form input, banner peringatan limit (#groq-limit-banner) tepat di
+     atas tombol "Prediksi Kategori" yang muncul apabila seluruh model Groq
+     sedang limit, dan tombol submit yang tetap selalu aktif.
+   - Kartu "Hasil Prediksi" (Rekomendasi Rak):
+     Menampilkan label prediksi, persentase keyakinan beserta progress bar,
+     catatan akurasi model (~66%), dan kotak "Penjelasan AI (Groq)" yang
+     otomatis dimuat via fetch() ke /penjelasan-prediksi/.
+   - Kartu "Rata-rata Harga per Genre" (Papan Harga):
+     Menampilkan gambar grafik base64 dari server.
+   - Kartu "Penjelasan Grafik" (Ulasan Pustakawan AI):
+     Menampilkan penjelasan grafik dari Groq AI beserta tombol "Buat ulang".
+   - Keamanan XSS:
+     Seluruh teks dari API AI dirender menggunakan .textContent (bukan .innerHTML),
+     dan payload prediksi disisipkan memakai filter Django json_script.
+
+H. klasifikasi/tests.py
+   Berisi 8 unit test terotomasi (menggunakan unittest.mock.patch untuk HTTP):
+   - test_index_page_renders_with_chart_and_groq_only
+   - test_valid_prediction_returns_result_even_when_all_groq_models_limited
+   - test_penjelasan_grafik_endpoint
+   - test_penjelasan_prediksi_endpoint_valid
+   - test_penjelasan_prediksi_endpoint_invalid_payload
+   - test_groq_429_auto_fallbacks_to_secondary_model
+   - test_all_models_429_sets_limit_status_before_predict
+   - test_groq_404_auto_fallbacks_to_active_model
+
+
+5. ALUR KERJA APLIKASI (END-TO-END)
+--------------------------------------------------------------------------------
+1. Pengguna membuka http://127.0.0.1:8000/ (GET /).
+2. Server merender halaman, menyertakan grafik harga dan status_ai awal.
+3. Browser otomatis memanggil GET /penjelasan/ untuk memuat penjelasan grafik
+   dari Groq dan memperbarui banner limit jika semua model penuh.
+4. Pengguna mengisi form Data Buku dan menekan "Prediksi Kategori" (POST /).
+5. Server memvalidasi input, menjalankan RandomForestClassifier secara lokal,
+   lalu menampilkan hasil prediksi (Fiction / Non Fiction + keyakinan %).
+6. Setelah halaman hasil tampil, JavaScript otomatis mengirim POST JSON ke
+   /penjelasan-prediksi/ untuk meminta Groq menjelaskan arti prediksi tersebut
+   dalam bahasa yang mudah dipahami orang awam.
+
+
+6. PANDUAN MENJALANKAN & MENGUJI PROYEK
+--------------------------------------------------------------------------------
+A. Menjalankan server lokal (Windows PowerShell):
+   .\venv\Scripts\python.exe manage.py runserver
+
+B. Memeriksa konfigurasi Django:
+   .\venv\Scripts\python.exe manage.py check
+
+C. Menjalankan seluruh unit test:
+   .\venv\Scripts\python.exe manage.py test klasifikasi -v 2
+
+D. Melatih ulang model ML (opsional):
+   .\venv\Scripts\python.exe klasifikasi\ml\train_model.py
+================================================================================
